@@ -1,7 +1,5 @@
 package eu.kanade.tachiyomi.extension.es.animeonlineninja
 
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -9,6 +7,8 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
+import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.util.asJsoup
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -25,7 +25,7 @@ class AnimeOnlineNinja : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
     override val lang = "es"
     override val supportsLatest = true
 
-    // Cliente con timeouts más largos y headers anti-Cloudflare
+    // Cliente con timeouts largos y headers anti-Cloudflare
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -36,7 +36,7 @@ class AnimeOnlineNinja : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
                 .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
                 .header("Accept-Language", "es-CL,es;q=0.9,en-US;q=0.8,en;q=0.7")
-                .header("Referer", baseUrl + "/")
+                .header("Referer", "$baseUrl/")
                 .header("Connection", "keep-alive")
                 .header("Upgrade-Insecure-Requests", "1")
                 .header("Sec-Fetch-Dest", "document")
@@ -46,7 +46,7 @@ class AnimeOnlineNinja : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
         }
         .build()
 
-    override val headersBuilder = Headers.Builder()
+    override fun headersBuilder() = Headers.Builder()
         .add("Referer", baseUrl)
         .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
 
@@ -117,48 +117,43 @@ class AnimeOnlineNinja : ConfigurableAnimeSource, ParsedAnimeHttpSource() {
         return episode
     }
 
-    // ----- Video Extractor -----
+    // ----- Videos (obligatorio: selector para la lista de videos en la página del episodio) -----
+    override fun videoListSelector() = "iframe[src*='ok.ru'], iframe[src*='streamtape'], iframe[src*='mixdrop'], iframe[src*='sbembed'], a[href*='ok.ru'], a[href*='streamtape']"
+
+    override fun videoFromElement(element: Element): Video {
+        val url = element.attr("src") ?: element.attr("href")
+        val quality = when {
+            url.contains("ok.ru") -> "OkRu"
+            url.contains("streamtape") -> "Streamtape"
+            url.contains("mixdrop") -> "Mixdrop"
+            else -> "Embed"
+        }
+        return Video(url, quality, url)
+    }
+
     override fun videoListParse(response: Response): List<Video> {
         val document = response.asJsoup()
-        val videoList = mutableListOf<Video>()
+        val videos = mutableListOf<Video>()
 
-        // Busca iframes o links de reproductores (común en estas webs)
-        document.select("iframe[src*='ok.ru'], iframe[src*='streamtape'], iframe[src*='mixdrop'], iframe[src*='sbembed']").forEach { iframe ->
-            val src = iframe.attr("src")
-            if (src.isNotBlank()) {
-                val quality = when {
-                    src.contains("ok.ru") -> "OkRu"
-                    src.contains("streamtape") -> "Streamtape"
-                    src.contains("mixdrop") -> "Mixdrop"
-                    else -> "Embed"
-                }
-                videoList.add(Video(src, quality, src))
+        document.select(videoListSelector()).forEach { element ->
+            val video = videoFromElement(element)
+            if (video.url.isNotBlank()) {
+                videos.add(video)
             }
         }
 
-        // Si no encuentra iframes, busca links directos o con JS
-        document.select("a[href*='ok.ru'], a[href*='streamtape']").forEach { a ->
-            val url = a.attr("href")
-            if (url.isNotBlank()) {
-                videoList.add(Video(url, "Direct", url))
-            }
+        // Si está vacío y parece Cloudflare, espera y reintenta (puedes aumentar retries)
+        if (videos.isEmpty() && (response.code in 400..599 || document.html().contains("cf-browser-verification"))) {
+            Thread.sleep(4000) // 4 segundos de espera para challenge
+            // Aquí podrías re-ejecutar la request, pero por simplicidad lo dejamos como retry manual en app
         }
 
-        // Retry si parece Cloudflare (status 403/503 o HTML con cf-browser-verification)
-        if (videoList.isEmpty() && (response.code == 403 || response.code == 503 || document.html().contains("cf-browser-verification"))) {
-            // Puedes agregar un delay y retry aquí si quieres más avanzado
-            Thread.sleep(3000) // 3 segundos de espera
-            // Reintenta la misma petición (puedes hacer un loop de 2-3 intentos en código real)
-        }
-
-        return videoList.ifEmpty { listOf(Video("No videos found", "Error", "")) }
+        return videos.ifEmpty { listOf(Video("No se encontraron videos", "Error", "")) }
     }
 
-    override fun List<Video>.sort(): List<Video> {
-        return this.reversed() // Prioriza los últimos encontrados o ajusta según prefieras
-    }
+    override fun List<Video>.sort(): List<Video> = this.reversed()
 
     override fun setupPreferenceScreen(screen: androidx.preference.PreferenceScreen) {
-        // Puedes agregar preferencias si quieres (ej: User-Agent custom)
+        // Agrega prefs si quieres en el futuro
     }
 }
